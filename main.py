@@ -1,7 +1,7 @@
 import torch.cuda
 from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QHBoxLayout, QVBoxLayout, QLabel, QFileDialog
 from PyQt5.QtGui import QPalette, QPixmap, QColor, QImage
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 import sys
 import cv2
 from ultralytics import YOLO
@@ -81,51 +81,66 @@ class Window(QWidget):
         """)
 
     def open_video_file(self):
-        filename, _ = QFileDialog.getOpenFileName(self, "Open Video", "", "Videos (*.mp4 *.avi)")
+        filename, _ = QFileDialog.getOpenFileName(self, "Open Video", "", "Videos (*.mp4)")
         if filename:
-            self.stopVideo = False
             self.imageLabel.setVisible(True)
-            self.label.setVisible(True)
+            self.stopVideo = False
+            self.frames = []
             cap = cv2.VideoCapture(filename)
             while cap.isOpened() and not self.stopVideo:
                 success, frame = cap.read()
                 if success:
-                    results = self.detectionResults(frame)
-                    self.imageLabel.setPixmap(results[0])
-                    self.label.setText("Trees count: " + str(results[1]))
+                    frame = cv2.resize(frame, (1920, 1080), fx=0, fy=0,
+                                       interpolation=cv2.INTER_NEAREST)
+                    results = self.detect(frame)
+                    self.frames.append(results[0])
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
                 else:
                     break
             cap.release()
+            self.label.setVisible(True)
+            self.current_frame_index = 0
+            self.timer = QTimer()
+            self.timer.timeout.connect(self.update_frame)
+            self.timer.start(17)
+
+    def update_frame(self):
+        if self.current_frame_index < len(self.frames) and not self.stopVideo:
+            annotated_frame = self.frames[self.current_frame_index].plot()
+            image = QImage(annotated_frame, annotated_frame.shape[1], annotated_frame.shape[0],
+                           QImage.Format_BGR888)
+            pixmap = QPixmap.fromImage(image)
+            scaled_pixmap = pixmap.scaled(self.x-300, self.y-200)
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.label.setText("Trees count: " + str(len(self.frames[self.current_frame_index].boxes.data)))
+            self.current_frame_index += 1
+        else:
+            self.timer.stop()  # Остановка таймера, если все кадры показаны
+            self.stopVideo = False
 
     def open_image_file(self):
         filename, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.xpm *.jpg *.bmp)")
         if filename:
             self.stopVideo = True  # Остановка вывода кадров видео
-            frame = cv2.imread(filename)
-            results = self.detectionResults(frame)
-            self.imageLabel.setPixmap(results[0])
-            self.label.setText("Number of trees: " + str(results[1]))
+            source = cv2.imread(filename)
+            frame = cv2.resize(source, (1920, 1080), fx=0, fy=0,
+                                 interpolation=cv2.INTER_NEAREST)
+            results = self.detect(frame)
+            annotated_frame = results[0].plot()
+            image = QImage(annotated_frame.data, annotated_frame.shape[1], annotated_frame.shape[0], QImage.Format_BGR888)
+            pixmap = QPixmap.fromImage(image)
+            scaled_pixmap = pixmap.scaled(self.x-300, self.y-200)
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.label.setText("Number of trees: " + str(len(results[0].boxes.data)))
             self.imageLabel.setVisible(True)
             self.label.setVisible(True)
 
-    # Функция, которая возвращает аннотированную картинку и количество деревьев
-    def detectionResults(self, frame):
-        frame = cv2.resize(frame, (1920, 1080), fx=0, fy=0,
-                           interpolation=cv2.INTER_NEAREST) #Изменение размера картинки перед её обработкой
-        results = self.detect(frame) #Получение результатов по обнаружению деревьев
-        annotated_frame = results[0].plot() #Получение аннотированная картинка
-        image = QImage(annotated_frame.data, annotated_frame.shape[1], annotated_frame.shape[0], QImage.Format_BGR888) #Преобразование картинки в подходящий для Pixmap формат
-        pixmap = QPixmap.fromImage(image)
-        scaled_pixmap = pixmap.scaled(self.x - 300, self.y - 200)
-        return (scaled_pixmap, len(results[0].boxes.data)) #Возврат pixmap и количества деревьев
-
     # Функция, которая возвращает результаты по обнаружению деревьев на картинке
     def detect(self, image):
-        #Если система имеет cuda ядра:
+        # Если система имеет cuda ядра:
         if torch.cuda.is_available():
-            result = model.predict(image, augment=True, imgsz=960, iou=0.2, device=0)
+            result = model(image, augment=True, imgsz=960, iou=0.2, device=0)
             # image - картинка, на которой необходимо обнаружить деревья
             # augment - улучшает надёжность обнаружения
             # imgsz - изменяет размер картинки. Правильное изменение размера может улучшить точность обнаружения и скорость обработки данных.
@@ -135,7 +150,7 @@ class Window(QWidget):
             # Значение 0 указывает, что выбрана первая GPU (для выбора нескольких надо написать [0, 1, 2], в зависимости от количества доступных GPU).
             # Для выбора процессора используется запись device="cpu".
         else:
-            result = model.predict(image, augment=True, imgsz=640, iou=0.2, device="cpu")
+            result = model(image, augment=True, imgsz=640, iou=0.2, device="cpu")
         return result
 
     def closeEvent(self, event):
@@ -143,7 +158,7 @@ class Window(QWidget):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    model = YOLO("model/model.pt") #Путь к обученной модели
+    model = YOLO("model/model.pt")
     window = Window()
     window.show()
     sys.exit(app.exec_())
